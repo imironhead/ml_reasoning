@@ -18,11 +18,94 @@
     [12 ~ 13] - shapes (0 ~ 1)
     [14 ~ 17] - positions (left, right, top, bottom)
 """
-import argparse
+import hashlib
 import itertools
 import os
-import pickle
 import random
+
+import numpy as np
+import tensorflow as tf
+
+
+def decode_random_qna(record):
+    """
+    decode image and questions in a tfrecord. return the image, a randomly
+    selected question and its answer.
+    """
+    features = tf.parse_single_example(record, features={
+        'image': tf.FixedLenFeature([], tf.string),
+        'image_size': tf.FixedLenFeature([], tf.int64),
+        'shape_size': tf.FixedLenFeature([], tf.int64),
+        'question_size': tf.FixedLenFeature([], tf.int64),
+        'answer_size': tf.FixedLenFeature([], tf.int64),
+        'num_relational_qnas': tf.FixedLenFeature([], tf.int64),
+        'num_non_relational_qnas': tf.FixedLenFeature([], tf.int64),
+        'qnas': tf.FixedLenFeature([], tf.string),
+    })
+
+    # NOTE: shape of each image is [image_size, image_size, 3]
+    image_size = tf.cast(features['image_size'], tf.int32)
+
+    # NOTE: for sort-of-clevt, a question consists of 11 binary flags.
+    # NOTE: for sott-of-clevr, an answer consists of 18 binary flags.
+    question_size = tf.cast(features['question_size'], tf.int32)
+    answer_size = tf.cast(features['answer_size'], tf.int32)
+    num_relational_qnas = tf.cast(features['num_relational_qnas'], tf.int32)
+    num_non_relational_qnas = \
+        tf.cast(features['num_non_relational_qnas'], tf.int32)
+
+    # NOTE: decode bytes back to floats
+    image = tf.decode_raw(features['image'], tf.float32)
+    qnas = tf.decode_raw(features['qnas'], tf.float32)
+
+    # NOTE: reshape image, all data in tfrecord is flattened
+    image = tf.reshape(image, [image_size, image_size, 3])
+
+    # NOTE: reshape questions and answers, all data in tfrecord is flattened
+    # NOTE: shape of questions & answers
+    #                               question(11)    answer(18)
+    #       relational     (10)
+    #       non relational (10)
+    qnas = tf.reshape(qnas, [
+        num_relational_qnas + num_non_relational_qnas,
+        question_size + answer_size])
+
+    # NOTE: random crop to randomly pick a question and answer pair
+    qna = tf.random_crop(qnas, [1, question_size + answer_size])
+
+    # NOTE: split q&a to question and answer
+    question = qna[0, :question_size]
+
+    answer = qna[0, question_size:]
+
+    return image, question, answer
+
+
+def build_clevr_batch_iterator(dir_path, batch_size=32):
+    """
+    read TFRecord batch.
+    """
+    # NOTE: build path list dataset, the '*' is must for google cloud storage
+    path_pattern = os.path.join(dir_path, '*.tfrecord')
+
+    data = tf.data.Dataset.list_files(path_pattern, shuffle=True)
+
+    # NOTE: the path generator never ends
+    data = data.repeat()
+
+    # NOTE: read tfrecord
+    data = tf.data.TFRecordDataset(data, num_parallel_reads=16)
+
+    # NOTE: decode tfrecord to get image, a question and its answer
+    data = data.map(decode_random_qna)
+
+    # NOTE: combine images to batch
+    data = data.batch(batch_size=batch_size)
+
+    # NOTE: create the final iterator
+    iterator = data.make_initializable_iterator()
+
+    return iterator
 
 
 def collide_shape(image, x, y, shape, shape_size):
@@ -74,6 +157,7 @@ def draw_shape(image, x, y, color, shape, shape_size):
 
 def generate_image(image_size, num_colors, num_shapes, shape_size):
     """
+    generate an image and draw some shapes on it.
     """
     # NOTE: an image use characters as pixel values
     image = [['0' for _ in range(image_size)] for _ in range(image_size)]
@@ -95,7 +179,7 @@ def generate_image(image_size, num_colors, num_shapes, shape_size):
         # NOTE: draw the colored object
         draw_shape(image, x, y, str(color_index), shape_index, shape_size)
 
-        # NOTE: keep object information to generate questions
+        # NOTE: keep object information for generating questions
         objects.append({
             'x': x + shape_size // 2,
             'y': y + shape_size // 2,
@@ -108,13 +192,21 @@ def generate_image(image_size, num_colors, num_shapes, shape_size):
     #
     #       defferent from paper:
     #       red / green / blue / magenta / yellow / cyan
+    #
+    #       transform the final image to a list of float
     table = {
-        '0': '000',
-        '1': '100', '2': '010', '3': '001',
-        '4': '101', '5': '110', '6': '011',
+        '0': [0.0, 0.0, 0.0],
+        '1': [1.0, 0.0, 0.0],
+        '2': [0.0, 1.0, 0.0],
+        '3': [0.0, 0.0, 1.0],
+        '4': [1.0, 0.0, 1.0],
+        '5': [1.0, 1.0, 0.0],
+        '6': [0.0, 1.0, 1.0],
     }
 
-    image = ''.join([table[p] for p in itertools.chain.from_iterable(image)])
+    image = [table[p] for p in itertools.chain.from_iterable(image)]
+
+    image = [p for p in itertools.chain.from_iterable(image)]
 
     return image, objects
 
@@ -125,13 +217,13 @@ def generate_relational_qnas_closest_to(objects):
 
     what is the shape of the object that is closest to the green object?
     """
-    q = ['1', '0', '1', '0', '0', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     # NOTE: pick an object
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: find the closest
     closest_index = object_index
@@ -153,10 +245,10 @@ def generate_relational_qnas_closest_to(objects):
             distance = d
             closest_index = idx
 
-    # NOTE: [ 6 ~ 11] - colors (0 ~ 5)
-    a[6 + closest_index] = '1'
+    # NOTE: 12: square, 13: triangle
+    a[12 + objects[closest_index]['s']] = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_relational_qnas_furthest_from(objects):
@@ -165,13 +257,13 @@ def generate_relational_qnas_furthest_from(objects):
 
     what is the shape of the object that is furthest from the green object?
     """
-    q = ['1', '0', '0', '1', '0', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     # NOTE: pick an object
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: find the furthest
     furthest_index = object_index
@@ -191,10 +283,10 @@ def generate_relational_qnas_furthest_from(objects):
             distance = d
             furthest_index = idx
 
-    # NOTE: [ 6 ~ 11] - colors (0 ~ 5)
-    a[6 + furthest_index] = '1'
+    # NOTE: 12: square, 13: triangle
+    a[12 + objects[furthest_index]['s']] = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_relational_qnas_count(objects):
@@ -203,13 +295,13 @@ def generate_relational_qnas_count(objects):
 
     how many objects have the shape of the green objects?
     """
-    q = ['1', '0', '0', '0', '1', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     # NOTE: pick an object
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: reference shape
     s = objects[object_index]['s']
@@ -218,13 +310,21 @@ def generate_relational_qnas_count(objects):
     count = sum([1 if o['s'] == s else 0 for o in objects])
 
     # NOTE: [ 0 ~  5] - counts (1 ~ 6), at least one (self)
-    a[count - 1]  = '1'
+    a[count - 1]  = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_relational_qnas(objects, num_qnas):
     """
+    generate and return list of relational questions & answers.
+
+    return format:
+    [
+        [0.0, 1.0, ...],
+        [0.0, 1.0, ...],
+        ...
+    ]
     """
     qnas = []
 
@@ -241,13 +341,17 @@ def generate_relational_qnas(objects, num_qnas):
         # NOTE: generate a random q&a
         generator = random.choice(generators)
 
-        qna = generator(objects)
+        q, a = generator(objects)
 
         # NOTE: skip duplicated q&a
-        if qna['q'] in codes:
+        code = np.array(q).tostring()
+
+        if code in codes:
             continue
 
-        qnas.append(qna)
+        codes.add(code)
+
+        qnas.append(q + a)
 
     return qnas
 
@@ -258,17 +362,17 @@ def generate_non_relational_qna_query_shape(size, objects):
 
     what is the shape of the red object?
     """
-    q = ['0', '1', '1', '0', '0', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: [12 ~ 13] - shapes (0 ~ 1)
-    a[12 + objects[object_index]['s']] = '1'
+    a[12 + objects[object_index]['s']] = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_non_relational_qna_query_horizontal_position(size, objects):
@@ -277,20 +381,20 @@ def generate_non_relational_qna_query_horizontal_position(size, objects):
 
     is the red object on the left or right of the image?
     """
-    q = ['0', '1', '0', '1', '0', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: a[14] is left and a[15] is right
     if objects[object_index]['x'] > size // 2:
-        a[15] = '1'
+        a[15] = 1.0
     else:
-        a[14] = '1'
+        a[14] = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_non_relational_qna_query_vertical_position(size, objects):
@@ -299,24 +403,32 @@ def generate_non_relational_qna_query_vertical_position(size, objects):
 
     is the red object on the top or bottom of the image?
     """
-    q = ['0', '1', '0', '0', '1', '0', '0', '0', '0', '0', '0']
-    a = ['0'] * 18
+    q = [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    a = [0.0] * 18
 
     object_index = random.randrange(len(objects))
 
-    q[5 + object_index] = '1'
+    q[5 + object_index] = 1.0
 
     # NOTE: a[16] is top and a[17] is bottom
     if objects[object_index]['y'] > size // 2:
-        a[17] = '1'
+        a[17] = 1.0
     else:
-        a[16] = '1'
+        a[16] = 1.0
 
-    return {'q': ''.join(q), 'a': ''.join(a)}
+    return q, a
 
 
 def generate_non_relational_qnas(size, objects, num_qnas):
     """
+    generate and return list of non-relational questions & answers.
+
+    return format:
+    [
+        [0.0, 1.0, ...],
+        [0.0, 1.0, ...],
+        ...
+    ]
     """
     qnas = []
 
@@ -333,79 +445,132 @@ def generate_non_relational_qnas(size, objects, num_qnas):
         # NOTE: generate a random q&a
         generator = random.choice(generators)
 
-        qna = generator(size, objects)
+        q, a = generator(size, objects)
 
         # NOTE: skip duplicated q&a
-        if qna['q'] in codes:
+        code = np.array(q).tostring()
+
+        if code in codes:
             continue
 
-        qnas.append(qna)
+        codes.add(code)
+
+        qnas.append(q + a)
 
     return qnas
 
 
-def generate_sort_of_clevr(args):
+def write_qnas(
+        path,
+        image,
+        image_size,
+        shape_size,
+        relational_qnas,
+        non_relational_qnas):
     """
+    path:
+        the method write the tfrecord to path
+    image:
+        list of pixel values in float.
+    image_size:
+        size of the image (image_size, image_size, 3).
+    shape_size:
+        size of shape bounding box on the image.
+    relational_qnas:
+        list of relational questions and their answers. one q&a is composed
+        with list of floats. qna[:11] is the question part while the rest of it
+        is its answer.
+    non_relational_qnas:
+        list of non relational questions and their answers. one q&a is composed
+        with list of floats. qna[:11] is the question part while the rest of it
+        is its answer.
     """
-    # NOTE: expect output
-    #       [
-    #           {
-    #               'image': '01010001010....101010',
-    #               'relational': [
-    #                   {'q': '11010101010', 'a': '101010101010'},
-    #                   {'q': '11100010100', 'a': '010101010010'},
-    #                   ...
-    #               ],
-    #               'non_relational': [
-    #                   {'q': '01010101010', 'a': '101010101010'},
-    #                   {'q': '01100010100', 'a': '010101010010'},
-    #                   ...
-    #               ],
-    #           },
-    #           {},
-    #           ...
-    #       ]
-    questions = {}
+    def floats_feature(q):
+        """
+        make a feature which consists of one list of floats
+        """
+        # NOTE: tfrecord can not encode floats. transform it to bytestring.
+        # NOTE: shape of q can not be encoded in a feature, it is encoded in
+        #       the other feature.
+        q = np.array(q, dtype=np.float32)
+        q = np.reshape(q, [-1])
+        q = q.tostring()
 
-    while len(questions) < args.num_images:
-        # NOTE: generate an image
-        image, objects = generate_image(args.image_size, 6, 2, args.shape_size)
+        return tf.train.Feature(bytes_list=tf.train.BytesList(value=[q]))
 
-        # NOTE: skip duplicated image
-        if image in questions:
-            continue
+    def int64_feature(v):
+        """
+        create a feature which consists of a 64-bits integer
+        """
+        return tf.train.Feature(int64_list=tf.train.Int64List(value=[v]))
 
-        relational_qnas = generate_relational_qnas(
-            objects, args.num_relational_per_image)
+    # NOTE: for sort-of-clevt, a question consists of 11 binary flags.
+    # NOTE: for sott-of-clevr, an answer consists of 18 binary flags.
 
-        non_relational_qnas = generate_non_relational_qnas(
-            args.image_size, objects, args.num_non_relational_per_image)
-
-        questions[image] = {
-            'image': image,
-            'relational': relational_qnas,
-            'non_relational': non_relational_qnas,
-        }
-
-    # NOTE: build dataset structure
-    sort_of_clevr = {
-        'image_size': args.image_size,
-        'shape_size': args.shape_size,
-        'questions': list(questions.values()),
+    feature = {
+        'image': floats_feature(image),
+        'image_size': int64_feature(image_size),
+        'shape_size': int64_feature(shape_size),
+        'question_size': int64_feature(11),
+        'answer_size': int64_feature(18),
+        'num_relational_qnas': int64_feature(len(relational_qnas)),
+        'num_non_relational_qnas': int64_feature(len(non_relational_qnas)),
+        'qnas': floats_feature(relational_qnas + non_relational_qnas),
     }
 
-    # NOTE: save
-    with open(args.result_path, 'wb') as pkl:
-        pickle.dump(sort_of_clevr, pkl)
+    with tf.python_io.TFRecordWriter(path) as writer:
+        example = tf.train.Example(features=tf.train.Features(feature=feature))
+
+        writer.write(example.SerializeToString())
 
 
-def explore_sort_of_clevr(args):
+def generate_sort_of_clevr():
     """
+    build sort-of-clevr dataset.
+    """
+    FLAGS = tf.app.flags.FLAGS
+
+    num_questions = 0
+
+    while num_questions < FLAGS.num_images:
+        # NOTE: generate an image
+        image, objects = \
+            generate_image(FLAGS.image_size, 6, 2, FLAGS.shape_size)
+
+        code = hashlib.md5(np.array(image).tostring()).hexdigest()
+
+        qna_path = os.path.join(FLAGS.result_dir_path, code + '.tfrecord')
+
+        # NOTE: skip duplicated image
+        if tf.gfile.Exists(qna_path):
+            continue
+
+        num_questions += 1
+
+        relational_qnas = generate_relational_qnas(
+            objects, FLAGS.num_relational_per_image)
+
+        non_relational_qnas = generate_non_relational_qnas(
+            FLAGS.image_size, objects, FLAGS.num_non_relational_per_image)
+
+        write_qnas(
+            qna_path,
+            image,
+            FLAGS.image_size,
+            FLAGS.shape_size,
+            relational_qnas,
+            non_relational_qnas)
+
+
+def explore_sort_of_clevr():
+    """
+    eyeball check the generated dataset
     """
     def build_answer(a):
         """
+        decode the answer and make it human readable.
         """
-        answer_index = a.find('1')
+        answer_index = np.argmax(a)
 
         if answer_index < 6:
             message = '{}'.format(answer_index + 1)
@@ -420,90 +585,120 @@ def explore_sort_of_clevr(args):
 
         return message
 
-    with open(args.source_path, 'rb') as pkl:
-        sort_of_clevr = pickle.load(pkl)
+    FLAGS = tf.app.flags.FLAGS
 
-    image_size = sort_of_clevr['image_size']
-    shape_size = sort_of_clevr['shape_size']
+    # NOTE: decode one image, question and answer
+    batch_iterator = build_clevr_batch_iterator(FLAGS.source_dir_path, 1)
 
-    print('image size: {}'.format(image_size))
-    print('shape size: {}'.format(shape_size))
+    iter_image, iter_q, iter_a = batch_iterator.get_next()
 
-    # NOTE: explore a random picked q&a
-    qnas = random.choice(sort_of_clevr['questions'])
+    with tf.Session() as session:
+        session.run(batch_iterator.initializer)
 
-    image = qnas['image']
+        images, qs, aas = session.run([iter_image, iter_q, iter_a])
 
-    r_qna = random.choice(qnas['relational'])
-    n_qna = random.choice(qnas['non_relational'])
+    # NOTE: squeeze the batch dimension
+    image, q, a = images[0], qs[0], aas[0]
 
-    # NOTE: print image
-    pixel_table = {
-        '000': ' ',
-        '100': '1', '010': '2', '001': '3',
-        '101': '4', '110': '5', '011': '6',
-    }
+    # NOTE: print the image
+    for y in range(image.shape[0]):
+        line = []
 
-    image = [image[i:i+3] for i in range(0, 3 * (image_size ** 2), 3)]
-    image = [pixel_table[pix] for pix in image]
+        for x in image[y]:
+            if np.all(x == np.array([0.0, 0.0, 0.0], dtype=np.float32)):
+                line.append(' ')
+            elif np.all(x == np.array([1.0, 0.0, 0.0], dtype=np.float32)):
+                line.append('1')
+            elif np.all(x == np.array([0.0, 1.0, 0.0], dtype=np.float32)):
+                line.append('2')
+            elif np.all(x == np.array([0.0, 0.0, 1.0], dtype=np.float32)):
+                line.append('3')
+            elif np.all(x == np.array([1.0, 0.0, 1.0], dtype=np.float32)):
+                line.append('4')
+            elif np.all(x == np.array([1.0, 1.0, 0.0], dtype=np.float32)):
+                line.append('5')
+            elif np.all(x == np.array([0.0, 1.0, 1.0], dtype=np.float32)):
+                line.append('6')
 
-    for i in range(0, image_size ** 2, image_size):
-        print(''.join(image[i:i+image_size]))
+        line.append('|')
 
-    print('\n')
+        print(''.join(line))
 
-    # NOTE: print a non relational question and answer
-    assert n_qna['q'][:2] == '01'
+    line = ['-'] * image.shape[1]
+    line[image.shape[1] // 2] = '^'
 
-    if n_qna['q'][2] == '1':
-        question = 'what is the shape of the {} object?'
-    if n_qna['q'][3] == '1':
-        question = 'is the {} object on the left or right of the image?'
-    if n_qna['q'][4] == '1':
-        question = 'is the {} object on the top or bottom of the image?'
+    print(''.join(line))
 
-    question = question.format(n_qna['q'][5:].find('1') + 1)
+    # NOTE: decode the question and make it human readable.
+    if q[0] == 0.0:
+        # NOTE: a non relational question
+        if q[2] == 1.0:
+            question = 'what is the shape of the {} object?'
+        if q[3] == 1.0:
+            question = 'is the {} object on the left or right of the image?'
+        if q[4] == 1.0:
+            question = 'is the {} object on the top or bottom of the image?'
 
-    answer = build_answer(n_qna['a'])
+        question = question.format(np.argmax(q[5:]) + 1)
+    else:
+        # NOTE: a relational question
+        if q[2] == 1.0:
+            question = 'what is the shape of the object that is closest to'
+        if q[3] == 1.0:
+            question = 'what is the shape of the object that is furthest from'
+        if q[4] == 1.0:
+            question = 'how many objects have the shape of'
+
+        question += ' the {} object?'.format(np.argmax(q[5:]) + 1)
+
+    answer = build_answer(a)
 
     print('{} {}'.format(question, answer))
 
-    # NOTE: re-build relational question and answer
-    assert r_qna['q'][:2] == '10'
 
-    if r_qna['q'][2] == '1':
-        question = 'what is the shape of the object that is closest to'
-    if r_qna['q'][3] == '1':
-        question = 'what is the shape of the object that is furthest from'
-    if r_qna['q'][4] == '1':
-        question = 'how many objects have the shape of'
+def main(_):
+    """
+    """
+    FLAGS = tf.app.flags.FLAGS
 
-    question += ' the {} object?'.format(r_qna['q'][5:].find('1') + 1)
+    if FLAGS.result_dir_path is not None:
+        generate_sort_of_clevr()
 
-    answer = build_answer(r_qna['a'])
-
-    print('{} {}'.format(question, answer))
+    if FLAGS.source_dir_path is not None:
+        explore_sort_of_clevr()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='build sort-of-clevr')
+    tf.app.flags.DEFINE_string(
+        'source_dir_path',
+        None,
+        'path to a dir which contains sort-of-clevr dataset')
+    tf.app.flags.DEFINE_string(
+        'result_dir_path',
+        None,
+        'path to a dir for saving generated sort-of-clevr dataset')
 
-    # NOTE: arguments for generating sort-of-clevr
-    parser.add_argument('--result_path', type=str)
-    parser.add_argument('--image_size', type=int, default=75)
-    parser.add_argument('--shape_size', type=int, default=11)
-    parser.add_argument('--num_images', type=int, default=10_000)
-    parser.add_argument('--num_relational_per_image', type=int, default=10)
-    parser.add_argument('--num_non_relational_per_image', type=int, default=10)
+    tf.app.flags.DEFINE_integer(
+        'image_size',
+        75,
+        'size of the images to be generated')
+    tf.app.flags.DEFINE_integer(
+        'shape_size',
+        11,
+        'size of shape bounding box on the image to be generated')
+    tf.app.flags.DEFINE_integer(
+        'num_images',
+        10000,
+        'number of images to be generated')
 
-    # NOTE: arguments for exploring sort-of-clevr
-    parser.add_argument('--source_path', type=str)
+    tf.app.flags.DEFINE_integer(
+        'num_relational_per_image',
+        10,
+        'number of relational question&answer for each generated image')
+    tf.app.flags.DEFINE_integer(
+        'num_non_relational_per_image',
+        10,
+        'number of non-relational question&answer for each generated image')
 
-    args = parser.parse_args()
-
-    if args.result_path is not None:
-        generate_sort_of_clevr(args)
-
-    if args.source_path is not None:
-        explore_sort_of_clevr(args)
+    tf.app.run()
 
