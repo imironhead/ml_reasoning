@@ -27,12 +27,11 @@ import numpy as np
 import tensorflow as tf
 
 
-def decode_random_qna(record):
+def decode_qnas(serialized_example):
     """
-    decode image and questions in a tfrecord. return the image, a randomly
-    selected question and its answer.
+    decode image and questions in a tfrecord.
     """
-    features = tf.parse_single_example(record, features={
+    features = tf.parse_single_example(serialized_example, features={
         'image': tf.FixedLenFeature([], tf.string),
         'image_size': tf.FixedLenFeature([], tf.int64),
         'shape_size': tf.FixedLenFeature([], tf.int64),
@@ -46,7 +45,7 @@ def decode_random_qna(record):
     # NOTE: shape of each image is [image_size, image_size, 3]
     image_size = tf.cast(features['image_size'], tf.int32)
 
-    # NOTE: for sort-of-clevt, a question consists of 11 binary flags.
+    # NOTE: for sort-of-clevr, a question consists of 11 binary flags.
     # NOTE: for sott-of-clevr, an answer consists of 18 binary flags.
     question_size = tf.cast(features['question_size'], tf.int32)
     answer_size = tf.cast(features['answer_size'], tf.int32)
@@ -59,10 +58,10 @@ def decode_random_qna(record):
     qnas = tf.decode_raw(features['qnas'], tf.float32)
 
     # NOTE: reshape image, all data in tfrecord is flattened
-    image = tf.reshape(image, [image_size, image_size, 3])
+    image = tf.reshape(image, [image_size, image_size, -1])
 
     # NOTE: reshape questions and answers, all data in tfrecord is flattened
-    # NOTE: shape of questions & answers
+    # NOTE: default shape of questions & answers
     #                               question(11)    answer(18)
     #       relational     (10)
     #       non relational (10)
@@ -70,13 +69,21 @@ def decode_random_qna(record):
         num_relational_qnas + num_non_relational_qnas,
         question_size + answer_size])
 
+    return image, qnas
+
+
+def decode_random_qna(serialized_example):
+    """
+    decode image and questions in a tfrecord. return the image, a randomly
+    selected question and its answer.
+    """
+    image, qnas = decode_qnas(serialized_example)
+
     # NOTE: random crop to randomly pick a question and answer pair
-    qna = tf.random_crop(qnas, [1, question_size + answer_size])
+    qna = tf.random_crop(qnas, [1, 11 + 18])
 
     # NOTE: split q&a to question and answer
-    question = qna[0, :question_size]
-
-    answer = qna[0, question_size:]
+    question, answer = qna[0, :11], qna[0, 11:]
 
     return image, question, answer
 

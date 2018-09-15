@@ -39,7 +39,7 @@ def build_rn_model(images, questions, answers):
     #       indicating its relative spatial position, and was treated as an
     #       object for the RN.
     #
-    #       71x71 -> 35x35 -> 17x17 -> 8x8
+    #       71x71 -> 71x71 -> 35x35 -> 17x17 -> 8x8
     x = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
     u, v = np.meshgrid(x, x)
 

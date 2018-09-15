@@ -2,6 +2,7 @@
 """
 import os
 
+import numpy as np
 import tensorflow as tf
 
 import rn.dataset_sort_of_clevr as dataset
@@ -13,8 +14,11 @@ def build_dataset():
     """
     FLAGS = tf.app.flags.FLAGS
 
-    return dataset.build_clevr_batch_iterator(
-        FLAGS.training_data_path, FLAGS.batch_size)
+    if FLAGS.data_path is None:
+        return None
+    else:
+        return dataset.build_clevr_batch_iterator(
+            FLAGS.data_path, FLAGS.batch_size)
 
 
 def build_model(dataset_iterator):
@@ -44,19 +48,25 @@ def build_model(dataset_iterator):
     #       [12 ~ 13] - shapes (0 ~ 1)
     #       [14 ~ 17] - positions (left, right, top, bottom)
 
-    next_image_batch, next_question_batch, next_answer_batch = \
-        dataset_iterator.get_next()
+    # NOTE: build placeholder if there is no dataset iterator
+    #       the model will than be used for testing
+    if dataset_iterator is None:
+        images = tf.placeholder(shape=[None, None, None, 3], dtype=tf.float32)
+
+        questions = tf.placeholder(shape=[None, 11], dtype=tf.float32)
+
+        answers = tf.placeholder(shape=[None, 18], dtype=tf.float32)
+    else:
+        images, questions, answers = dataset_iterator.get_next()
 
     # NOTE: arXiv:1706.01427v1, supplementary material, d, sort-of-clevr
     #       we also trained a comparable MLP based model (CNN+MLP model) on the
     #       sort-of-clevr task, to explore the extent to which a standard model
     #       can learn to answer relational questions.
     if FLAGS.type == 'rn':
-        model = model_rn.build_rn_model(
-            next_image_batch, next_question_batch, next_answer_batch)
+        model = model_rn.build_rn_model(images, questions, answers)
     else:
-        model = model_rn.build_mpl_model(
-            next_image_batch, next_question_batch, next_answer_batch)
+        model = model_rn.build_mpl_model(images, questions, answers)
 
     return model
 
@@ -99,7 +109,7 @@ def train(model, data_iterator):
 
         session.run(data_iterator.initializer)
 
-        while step < 1000000:
+        while step < 20000:
             fetch = {
                 'step': model['step'],
                 'optimizer': model['optimizer'],
@@ -118,10 +128,77 @@ def train(model, data_iterator):
         saver.save(session, target_ckpt_path, global_step=model['step'])
 
 
-def test(model, data_iterator):
+def test(model):
     """
     """
+    def record_decoder():
+        """
+        """
+        record_path = tf.placeholder(shape=[], dtype=tf.string)
+
+        data = tf.data.TFRecordDataset(record_path)
+
+        data = data.map(dataset.decode_qnas)
+
+        iterator = data.make_initializable_iterator()
+
+        image, qnas = iterator.get_next()
+
+        n = tf.shape(qnas)[0]
+
+        image = tf.expand_dims(image, axis=0)
+
+        images = tf.tile(image, [n, 1, 1, 1])
+
+        return {
+            'path': record_path,
+            'images': images,
+            'questions': qnas[:, :11],
+            'answers': qnas[:, 11:],
+            'iterator': iterator,
+        }
+
     FLAGS = tf.app.flags.FLAGS
+
+    source_ckpt_path = tf.train.latest_checkpoint(FLAGS.ckpt_path)
+
+    decoder = record_decoder()
+
+    records = os.listdir(FLAGS.data_path)
+
+    records = [os.path.join(FLAGS.data_path, r) for r in records]
+
+    total = 0
+    right = 0
+
+    with tf.Session() as session:
+        tf.train.Saver().restore(session, source_ckpt_path)
+
+        for record in records:
+            feeds = { decoder['path']: record }
+
+            session.run(decoder['iterator'].initializer, feed_dict=feeds)
+
+            fetch = {
+                'images': decoder['images'],
+                'questions': decoder['questions'],
+                'answers': decoder['answers'],
+            }
+
+            fetched = session.run(fetch, feed_dict=feeds)
+
+            feeds = {
+                model['images']: fetched['images'],
+                model['questions']: fetched['questions'],
+            }
+
+            results = session.run(model['results'], feed_dict=feeds)
+
+            total += results.shape[0]
+
+            right += np.sum(np.argmax(results, axis=1) == np.argmax(fetched['answers'], axis=1))
+
+    print('{} / {}'.format(right, total))
 
 
 def main(_):
@@ -132,12 +209,15 @@ def main(_):
     dataset_iterator = build_dataset()
     model = build_model(dataset_iterator)
 
-    train(model, dataset_iterator)
+    if FLAGS.eval:
+        test(model)
+    else:
+        train(model, dataset_iterator)
 
 
 if __name__ == '__main__':
     tf.app.flags.DEFINE_string(
-        'training_data_path', None, 'path to the dataset, a pickle file')
+        'data_path', None, 'path to the dataset')
 
     tf.app.flags.DEFINE_string(
         'ckpt_path', None, 'path to the checkpoint')
@@ -147,6 +227,9 @@ if __name__ == '__main__':
 
     tf.app.flags.DEFINE_string(
         'type', 'rn', 'rn or mlp for training')
+
+    tf.app.flags.DEFINE_boolean(
+        'eval', False, 'do evaluation instead of training')
 
     # NOTE: arXiv:1706.01427v1, supplementary material, d, sort-of-clevr
     #       the softmax output was optimized with a cross-entropy loss function
