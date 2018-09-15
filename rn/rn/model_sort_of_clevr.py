@@ -90,7 +90,7 @@ def build_rn_model(images, questions, answers):
     for i in range(4):
         tensors = tf.layers.dense(
             tensors,
-            units=2_000,
+            units=2000,
             activation=tf.nn.relu,
             use_bias=True,
             kernel_initializer=initializer,
@@ -104,7 +104,7 @@ def build_rn_model(images, questions, answers):
     # NOTE: arXiv:1706.01427v1, supplementary material, d, sort-of-clevr
     #       and a four-layer MLP consisting of 2,000, 1,000, 500, 100 units
     #       with ReLU non-linearities used for f_phi.
-    for i, units in enumerate([2_000, 1_000, 500, 100]):
+    for i, units in enumerate([2000, 1000, 500, 100]):
         tensors = tf.layers.dense(
             tensors,
             units=units,

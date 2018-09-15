@@ -93,8 +93,6 @@ def train(model, data_iterator):
 
     reporter = tf.summary.FileWriter(FLAGS.logs_path)
 
-    saver = tf.train.Saver()
-
     with tf.Session() as session:
         if source_ckpt_path is None:
             session.run(tf.global_variables_initializer())
@@ -109,7 +107,7 @@ def train(model, data_iterator):
 
         session.run(data_iterator.initializer)
 
-        while step < 20000:
+        while step < FLAGS.max_training_steps:
             fetch = {
                 'step': model['step'],
                 'optimizer': model['optimizer'],
@@ -125,7 +123,7 @@ def train(model, data_iterator):
 
         reporter.flush()
 
-        saver.save(session, target_ckpt_path, global_step=model['step'])
+        tf.train.Saver().save(session, target_ckpt_path, global_step=step)
 
 
 def test(model):
@@ -237,6 +235,9 @@ if __name__ == '__main__':
     #       mini-batches of size 64.
     tf.app.flags.DEFINE_integer(
         'batch_size', 64, 'size of mini-batches')
+
+    tf.app.flags.DEFINE_integer(
+        'max_training_steps', 100000, 'stop training at the specified step')
 
     tf.app.run()
 

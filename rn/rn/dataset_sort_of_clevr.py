@@ -58,7 +58,7 @@ def decode_qnas(serialized_example):
     qnas = tf.decode_raw(features['qnas'], tf.float32)
 
     # NOTE: reshape image, all data in tfrecord is flattened
-    image = tf.reshape(image, [image_size, image_size, -1])
+    image = tf.reshape(image, [image_size, image_size, 3])
 
     # NOTE: reshape questions and answers, all data in tfrecord is flattened
     # NOTE: default shape of questions & answers
