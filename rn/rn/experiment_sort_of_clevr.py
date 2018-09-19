@@ -66,7 +66,7 @@ def build_model(dataset_iterator):
     if FLAGS.type == 'rn':
         model = model_rn.build_rn_model(images, questions, answers)
     else:
-        model = model_rn.build_mpl_model(images, questions, answers)
+        model = model_rn.build_mlp_model(images, questions, answers)
 
     return model
 
@@ -162,12 +162,14 @@ def test(model):
 
     decoder = record_decoder()
 
-    records = os.listdir(FLAGS.data_path)
+    records = tf.gfile.ListDirectory(FLAGS.data_path)
 
     records = [os.path.join(FLAGS.data_path, r) for r in records]
 
-    total = 0
-    right = 0
+    total_re = 0
+    total_nr = 0
+    right_re = 0
+    right_nr = 0
 
     with tf.Session() as session:
         tf.train.Saver().restore(session, source_ckpt_path)
@@ -192,11 +194,18 @@ def test(model):
 
             results = session.run(model['results'], feed_dict=feeds)
 
-            total += results.shape[0]
+            right = (np.argmax(results, axis=1) == np.argmax(fetched['answers'], axis=1))
 
-            right += np.sum(np.argmax(results, axis=1) == np.argmax(fetched['answers'], axis=1))
+            for i in range(results.shape[0]):
+                if fetched['questions'][i, 0] == 0.0:
+                    total_nr += 1
+                    right_nr += right[i]
+                else:
+                    total_re += 1
+                    right_re += right[i]
 
-    print('{} / {}'.format(right, total))
+    print('    relational: {} / {}'.format(right_re, total_re))
+    print('non-relational: {} / {}'.format(right_nr, total_nr))
 
 
 def main(_):
