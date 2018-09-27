@@ -14,7 +14,7 @@ def build_dataset():
     """
     FLAGS = tf.app.flags.FLAGS
 
-    if FLAGS.data_path is None:
+    if FLAGS.data_path is None or FLAGS.eval:
         return None
     else:
         return dataset.build_clevr_batch_iterator(
@@ -63,12 +63,9 @@ def build_model(dataset_iterator):
     #       we also trained a comparable MLP based model (CNN+MLP model) on the
     #       sort-of-clevr task, to explore the extent to which a standard model
     #       can learn to answer relational questions.
-    if FLAGS.type == 'rn':
-        model = model_rn.build_rn_model(images, questions, answers)
-    else:
-        model = model_rn.build_mlp_model(images, questions, answers)
 
-    return model
+    return model_rn.build_model(
+        images, questions, answers, FLAGS.type, FLAGS.tag_positions)
 
 
 def build_summaries(model):
@@ -237,6 +234,9 @@ if __name__ == '__main__':
 
     tf.app.flags.DEFINE_boolean(
         'eval', False, 'do evaluation instead of training')
+
+    tf.app.flags.DEFINE_boolean(
+        'tag_positions', True, 'append positions to objects (hidden layer)')
 
     # NOTE: arXiv:1706.01427v1, supplementary material, d, sort-of-clevr
     #       the softmax output was optimized with a cross-entropy loss function

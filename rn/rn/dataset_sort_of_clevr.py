@@ -583,12 +583,10 @@ def explore_sort_of_clevr():
             message = '{}'.format(answer_index + 1)
         elif answer_index < 12:
             message = '{}'.format(answer_index - 6 + 1)
-        elif answer_index < 14:
-            message = '{}'.format('square' if answer_index == 12 else 'triangle')
-        elif answer_index < 16:
-            message = '{}'.format('left' if answer_index == 14 else 'right')
         else:
-            message = '{}'.format('top' if answer_index == 16 else 'bottom')
+            answers = ['square', 'triangle', 'left', 'right', 'top', 'bottom']
+
+            message = answers[answer_index - 12]
 
         return message
 
